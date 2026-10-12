@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use super::view::{format_state, OverlayView, ViewParams};
+use super::view::{border_frame, format_state, OverlayView, ViewParams};
 use crate::app::AppUpdate;
 use crate::settings::OverlaySettings;
 
@@ -22,8 +22,13 @@ const USER_CSS_PATH: &str = "iron-heart-overlay.css";
 const BASE_CLASS: &str = "iron-heart-overlay";
 
 const DEFAULT_CSS: &str = "
-window.iron-heart-overlay-window {
+window.iron-heart-overlay-window,
+window.iron-heart-overlay-border-window {
     background: transparent;
+}
+
+.iron-heart-overlay-border {
+    color: #e01b24;
 }
 
 .iron-heart-overlay {
@@ -169,10 +174,49 @@ fn load_css(display: &gtk::gdk::Display) {
     }
 }
 
+type AlarmStart = Rc<Cell<Option<Instant>>>;
+/// Gradient start and end points (x0, y0, x1, y1)
+type Line = (f64, f64, f64, f64);
+type Quad = [(f64, f64); 4];
+
+/// Full-screen gradient that is only shown (and animated) while the alarm is active.
+struct BorderWindow {
+    window: gtk::Window,
+    area: gtk::DrawingArea,
+    tick: RefCell<Option<gtk::TickCallbackId>>,
+}
+
+impl BorderWindow {
+    fn set_active(&self, active: bool) {
+        let mut tick = self.tick.borrow_mut();
+        if active == tick.is_some() {
+            return;
+        }
+        if active {
+            self.window.present();
+            *tick = Some(self.area.add_tick_callback(|area, _| {
+                area.queue_draw();
+                gtk::glib::ControlFlow::Continue
+            }));
+        } else {
+            if let Some(id) = tick.take() {
+                id.remove();
+            }
+            self.window.set_visible(false);
+        }
+    }
+
+    fn close(&self) {
+        self.set_active(false);
+        self.window.close();
+    }
+}
+
 struct OverlayWindow {
     monitor: gtk::gdk::Monitor,
     window: gtk::Window,
     label: gtk::Label,
+    border: BorderWindow,
 }
 
 fn set_view(label: &gtk::Label, view: &OverlayView) {
@@ -182,7 +226,118 @@ fn set_view(label: &gtk::Label, view: &OverlayView) {
     label.set_css_classes(&classes);
 }
 
-fn build_window(settings: &OverlaySettings, monitor: &gtk::gdk::Monitor) -> OverlayWindow {
+fn draw_border(
+    area: &gtk::DrawingArea,
+    cr: &gtk::cairo::Context,
+    width: i32,
+    height: i32,
+    elapsed: Duration,
+) {
+    let frame = border_frame(elapsed);
+    let color = area.color();
+    let (r, g, b) = (
+        color.red() as f64,
+        color.green() as f64,
+        color.blue() as f64,
+    );
+    let alpha = frame.alpha * color.alpha() as f64;
+
+    let (w, h) = (width as f64, height as f64);
+    let t = frame.thickness.min(w / 2.0).min(h / 2.0);
+    if t <= 0.0 {
+        return;
+    }
+
+    // Each edge is a trapezoid with a gradient fading inward. The diagonal joins have equal
+    // strength on both sides, so with antialiasing off no seam is visible in the corners.
+    cr.set_antialias(gtk::cairo::Antialias::None);
+    let edges: [(Line, Quad); 4] = [
+        (
+            (0.0, 0.0, 0.0, t),
+            [(0.0, 0.0), (w, 0.0), (w - t, t), (t, t)],
+        ),
+        (
+            (0.0, h, 0.0, h - t),
+            [(0.0, h), (w, h), (w - t, h - t), (t, h - t)],
+        ),
+        (
+            (0.0, 0.0, t, 0.0),
+            [(0.0, 0.0), (t, t), (t, h - t), (0.0, h)],
+        ),
+        (
+            (w, 0.0, w - t, 0.0),
+            [(w, 0.0), (w, h), (w - t, h - t), (w - t, t)],
+        ),
+    ];
+    for ((x0, y0, x1, y1), points) in edges {
+        let gradient = gtk::cairo::LinearGradient::new(x0, y0, x1, y1);
+        gradient.add_color_stop_rgba(0.0, r, g, b, alpha);
+        gradient.add_color_stop_rgba(0.35, r, g, b, alpha * 0.45);
+        gradient.add_color_stop_rgba(1.0, r, g, b, 0.0);
+        let _ = cr.set_source(&gradient);
+        cr.move_to(points[0].0, points[0].1);
+        for (x, y) in &points[1..] {
+            cr.line_to(*x, *y);
+        }
+        cr.close_path();
+        if let Err(e) = cr.fill() {
+            debug!("Couldn't draw overlay border: {e}");
+            return;
+        }
+    }
+}
+
+fn build_border(
+    settings: &OverlaySettings,
+    monitor: &gtk::gdk::Monitor,
+    alarm_start: &AlarmStart,
+) -> BorderWindow {
+    let window = gtk::Window::new();
+    window.set_decorated(false);
+    window.set_focusable(false);
+    window.add_css_class("iron-heart-overlay-border-window");
+
+    window.init_layer_shell();
+    window.set_monitor(Some(monitor));
+    window.set_namespace(Some("iron-heart-border"));
+    window.set_layer(parse_layer(&settings.layer));
+    for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+        window.set_anchor(edge, true);
+    }
+    window.set_keyboard_mode(KeyboardMode::None);
+    // Cover the whole monitor, even where panels reserve space
+    window.set_exclusive_zone(-1);
+
+    // Re-applied on every map, since the window is hidden between alarms
+    window.connect_map(|window| match window.surface() {
+        Some(surface) => surface.set_input_region(Some(&gtk::cairo::Region::create())),
+        None => warn!("Overlay border has no surface, can't enable click-through"),
+    });
+
+    let area = gtk::DrawingArea::new();
+    area.add_css_class("iron-heart-overlay-border");
+    area.set_hexpand(true);
+    area.set_vexpand(true);
+    let alarm_start = alarm_start.clone();
+    area.set_draw_func(move |area, cr, width, height| {
+        if let Some(started) = alarm_start.get() {
+            draw_border(area, cr, width, height, started.elapsed());
+        }
+    });
+    window.set_child(Some(&area));
+
+    BorderWindow {
+        window,
+        area,
+        tick: RefCell::new(None),
+    }
+}
+
+fn build_window(
+    settings: &OverlaySettings,
+    monitor: &gtk::gdk::Monitor,
+    alarm_start: &AlarmStart,
+) -> OverlayWindow {
     let window = gtk::Window::new();
     window.set_decorated(false);
     window.set_focusable(false);
@@ -213,6 +368,7 @@ fn build_window(settings: &OverlaySettings, monitor: &gtk::gdk::Monitor) -> Over
         monitor: monitor.clone(),
         window,
         label,
+        border: build_border(settings, monitor, alarm_start),
     }
 }
 
@@ -247,6 +403,9 @@ fn run_gtk(settings: OverlaySettings, mut rx: UnboundedReceiver<OverlayMsg>) {
     let last_packet: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
     let applied: Rc<RefCell<Option<OverlayView>>> = Rc::new(RefCell::new(None));
     let windows: Rc<RefCell<Vec<OverlayWindow>>> = Rc::new(RefCell::new(Vec::new()));
+    // When BPM first went out of range; None while in range (resets the border)
+    let alarm_start: AlarmStart = Rc::new(Cell::new(None));
+    let alarm_border = settings.alarm_border;
 
     // Only touches the widgets when something changed, since resetting
     // CSS classes would restart the alarm flash animation
@@ -255,14 +414,22 @@ fn run_gtk(settings: OverlaySettings, mut rx: UnboundedReceiver<OverlayMsg>) {
         let last_packet = last_packet.clone();
         let applied = applied.clone();
         let windows = windows.clone();
+        let alarm_start = alarm_start.clone();
         Rc::new(move || {
             let age = last_packet.get().map(|at| at.elapsed());
             let view = format_state(last_bpm.get(), age, &params);
             if applied.borrow().as_ref() == Some(&view) {
                 return;
             }
+            let alarming = view.classes.contains(&"alarm");
+            if !alarming {
+                alarm_start.set(None);
+            } else if alarm_start.get().is_none() {
+                alarm_start.set(Some(Instant::now()));
+            }
             for overlay in windows.borrow().iter() {
                 set_view(&overlay.label, &view);
+                overlay.border.set_active(alarm_border && alarming);
             }
             *applied.borrow_mut() = Some(view);
         })
@@ -273,6 +440,7 @@ fn run_gtk(settings: OverlaySettings, mut rx: UnboundedReceiver<OverlayMsg>) {
         let display = display.clone();
         let windows = windows.clone();
         let applied = applied.clone();
+        let alarm_start = alarm_start.clone();
         Rc::new(move || {
             let monitors = display.monitors();
             let current: Vec<gtk::gdk::Monitor> = (0..monitors.n_items())
@@ -291,6 +459,7 @@ fn run_gtk(settings: OverlaySettings, mut rx: UnboundedReceiver<OverlayMsg>) {
             for overlay in removed {
                 debug!("Closing overlay for removed monitor");
                 overlay.window.close();
+                overlay.border.close();
             }
 
             for monitor in &current {
@@ -302,11 +471,14 @@ fn run_gtk(settings: OverlaySettings, mut rx: UnboundedReceiver<OverlayMsg>) {
                     "Opening overlay on {}",
                     connector.as_deref().unwrap_or("unknown")
                 );
-                let overlay = build_window(&settings, monitor);
+                let overlay = build_window(&settings, monitor, &alarm_start);
                 if let Some(view) = applied.borrow().as_ref() {
                     set_view(&overlay.label, view);
                 }
                 overlay.window.present();
+                overlay
+                    .border
+                    .set_active(alarm_border && alarm_start.get().is_some());
                 windows.borrow_mut().push(overlay);
             }
         })
@@ -335,6 +507,7 @@ fn run_gtk(settings: OverlaySettings, mut rx: UnboundedReceiver<OverlayMsg>) {
             let all = std::mem::take(&mut *windows.borrow_mut());
             for overlay in all {
                 overlay.window.close();
+                overlay.border.close();
             }
             main_loop.quit();
         }

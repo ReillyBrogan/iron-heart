@@ -169,13 +169,17 @@ stale_secs = 5
 # Overlay flashes when BPM is outside this range, 0 disables that limit
 low_bpm = 0
 high_bpm = 0
+# Also glow red around the edges of every screen while out of range
+alarm_border = true
 ```
 
 ## Heart Rate Overlay (Linux/Wayland)
 
 An optional small overlay can show your current heart rate (`♥ 72`) near the bottom of every connected display while the TUI is running (monitors that are plugged in or removed later are picked up automatically).
 It sits on top of other windows, doesn't reserve any screen space, and mouse clicks pass through it.
-If `low_bpm` or `high_bpm` are set and your heart rate goes outside that range, the overlay flashes.
+If `low_bpm` or `high_bpm` are set and your heart rate goes outside that range, the overlay flashes and a red gradient border pulses around the edges of every display.
+The border is invisible while your heart rate is in range, slowly grows the longer it stays out of range (reaching full size after about 90 seconds), and resets as soon as it's back in range.
+Set `alarm_border = false` to keep only the flashing text.
 
 It uses the TUI's connection, so pick your device in the TUI as usual and the overlay follows along.
 
@@ -195,6 +199,14 @@ The overlay's text has the class `.iron-heart-overlay`, plus one or more state c
 | `.disconnected` | No reading (shows `♥ --`) |
 | `.stale` | No packet received for `stale_secs` |
 | `.alarm` | BPM is outside `low_bpm`/`high_bpm` |
+
+The border is a separate full-screen window with the class `.iron-heart-overlay-border`; its `color` is the glow color:
+
+```css
+.iron-heart-overlay-border {
+    color: #e66100;
+}
+```
 
 For example, to make the alarm flash orange, and faster:
 

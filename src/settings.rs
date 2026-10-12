@@ -138,6 +138,8 @@ pub struct OverlaySettings {
     pub low_bpm: u16,
     // 0 disables the limit
     pub high_bpm: u16,
+    // Red glow around the whole screen while BPM is outside the limits
+    pub alarm_border: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -250,6 +252,7 @@ impl Settings {
             .set_default("overlay.stale_secs", 5)?
             .set_default("overlay.low_bpm", 0)?
             .set_default("overlay.high_bpm", 0)?
+            .set_default("overlay.alarm_border", true)?
             .build()?
             .try_deserialize()?;
 

@@ -46,6 +46,38 @@ pub fn format_state(
     }
 }
 
+const BORDER_START_PX: f64 = 24.0;
+const BORDER_FULL_PX: f64 = 220.0;
+const BORDER_GROW_TIME: Duration = Duration::from_secs(90);
+const BORDER_FLASH_PERIOD_SECS: f64 = 1.0;
+const BORDER_MIN_ALPHA: f64 = 0.25;
+const BORDER_MAX_ALPHA: f64 = 0.85;
+
+/// How the alarm border should look at a given moment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BorderFrame {
+    /// Opacity multiplier, 0.0 to 1.0
+    pub alpha: f64,
+    /// Width of the gradient in logical pixels
+    pub thickness: f64,
+}
+
+/// `elapsed` is the time since the heart rate first went out of range.
+///
+/// The border pulses at full strength first, then slowly widens (fast at first, easing off)
+/// until it reaches its full size.
+pub fn border_frame(elapsed: Duration) -> BorderFrame {
+    let secs = elapsed.as_secs_f64();
+    let pulse = 0.5 + 0.5 * (std::f64::consts::TAU * secs / BORDER_FLASH_PERIOD_SECS).cos();
+    let alpha = BORDER_MIN_ALPHA + (BORDER_MAX_ALPHA - BORDER_MIN_ALPHA) * pulse;
+
+    let progress = (secs / BORDER_GROW_TIME.as_secs_f64()).min(1.0);
+    let eased = 1.0 - (1.0 - progress).powi(2);
+    let thickness = BORDER_START_PX + (BORDER_FULL_PX - BORDER_START_PX) * eased;
+
+    BorderFrame { alpha, thickness }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +173,43 @@ mod tests {
     fn no_alarm_when_disconnected() {
         let view = format_state(0, None, &params(60, 100));
         assert_eq!(view.classes, vec!["disconnected"]);
+    }
+
+    #[test]
+    fn border_starts_small_and_bright() {
+        let frame = border_frame(Duration::ZERO);
+        assert_eq!(frame.thickness, BORDER_START_PX);
+        assert!((frame.alpha - BORDER_MAX_ALPHA).abs() < 1e-9);
+    }
+
+    #[test]
+    fn border_flashes() {
+        let half = border_frame(Duration::from_secs_f64(BORDER_FLASH_PERIOD_SECS / 2.0));
+        assert!((half.alpha - BORDER_MIN_ALPHA).abs() < 1e-9);
+        let full = border_frame(Duration::from_secs_f64(BORDER_FLASH_PERIOD_SECS));
+        assert!((full.alpha - BORDER_MAX_ALPHA).abs() < 1e-9);
+    }
+
+    #[test]
+    fn border_alpha_stays_in_range() {
+        for ms in (0..200_000).step_by(37) {
+            let alpha = border_frame(Duration::from_millis(ms)).alpha;
+            assert!((BORDER_MIN_ALPHA..=BORDER_MAX_ALPHA).contains(&alpha));
+        }
+    }
+
+    #[test]
+    fn border_grows_then_stops() {
+        let mut previous = 0.0;
+        for secs in 0..=90 {
+            let thickness = border_frame(Duration::from_secs(secs)).thickness;
+            assert!(thickness >= previous);
+            previous = thickness;
+        }
+        assert_eq!(previous, BORDER_FULL_PX);
+        assert_eq!(
+            border_frame(BORDER_GROW_TIME * 10).thickness,
+            BORDER_FULL_PX
+        );
     }
 }
