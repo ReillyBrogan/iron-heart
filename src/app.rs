@@ -164,6 +164,9 @@ pub struct App {
     pub prometheus_handle: Option<JoinHandle<()>>,
     pub dummy_thread_handle: Option<JoinHandle<()>>,
     pub websocket_thread_handle: Option<JoinHandle<()>>,
+    pub overlay_forward_handle: Option<JoinHandle<()>>,
+    pub overlay_gtk_handle: Option<JoinHandle<()>>,
+    pub overlay_requested: bool,
     // Raw histories
     pub heart_rate_history: VecDeque<f64>,
     pub rr_history: VecDeque<f64>,
@@ -263,6 +266,9 @@ impl App {
             prometheus_handle: None,
             dummy_thread_handle: None,
             websocket_thread_handle: None,
+            overlay_forward_handle: None,
+            overlay_gtk_handle: None,
+            overlay_requested: arg_config.overlay,
             session_high_bpm: (0.0, Local::now()),
             session_low_bpm: (0.0, Local::now()),
             chart_high_bpm: 0.0,
@@ -301,6 +307,9 @@ impl App {
             self.start_osc_thread(activity);
         }
         self.start_logging_threads(activity.unwrap_or(0));
+        if self.settings.overlay.enabled || self.overlay_requested {
+            self.start_overlay_thread();
+        }
         // HR source selection
         if let Some(subcommands) = arg_config.subcommands.as_ref() {
             match subcommands {
@@ -677,6 +686,26 @@ impl App {
         }
     }
 
+    #[cfg(all(feature = "layer-shell", target_os = "linux"))]
+    pub fn start_overlay_thread(&mut self) {
+        let broadcast_rx = self.broadcast_tx.subscribe();
+        debug!("Spawning layer-shell overlay");
+        let (forward_handle, gtk_handle) = crate::overlay::spawn_overlay(
+            self.settings.overlay.clone(),
+            broadcast_rx,
+            self.cancel_actors.clone(),
+        );
+        self.overlay_forward_handle = Some(forward_handle);
+        self.overlay_gtk_handle = Some(gtk_handle);
+    }
+
+    #[cfg(not(all(feature = "layer-shell", target_os = "linux")))]
+    pub fn start_overlay_thread(&mut self) {
+        tracing::warn!(
+            "Overlay requested but iron-heart was built without the `layer-shell` feature"
+        );
+    }
+
     pub fn start_dummy_thread(&mut self, seconds_override: Option<f32>, vhs_prefill: bool) {
         let broadcast_tx = self.broadcast_tx.clone();
         let shutdown_requested_clone = self.cancel_actors.clone();
@@ -768,6 +797,20 @@ impl App {
             debug!("Joining Prometheus thread");
             if let Err(err) = timeout(duration, handle).await {
                 error!("Failed to join Prometheus thread: {:?}", err);
+            }
+        }
+
+        if let Some(handle) = self.overlay_forward_handle.take() {
+            debug!("Joining Overlay forwarder");
+            if let Err(err) = timeout(duration, handle).await {
+                error!("Failed to join Overlay forwarder: {:?}", err);
+            }
+        }
+
+        if let Some(handle) = self.overlay_gtk_handle.take() {
+            debug!("Joining Overlay GTK thread");
+            if let Err(err) = timeout(duration, handle).await {
+                error!("Failed to join Overlay GTK thread: {:?}", err);
             }
         }
 

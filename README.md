@@ -21,6 +21,7 @@ A BLE Heart Rate Monitor bridge built in Rust for use with OSC in Social VR, OBS
 - Prometheus Push logging for [metrics](https://github.com/user-attachments/assets/bd2e2aff-72fb-4d70-97ad-6522f80b18ac)! Compatible with [VictoriaMetrics](https://docs.victoriametrics.com/url-examples/#apiv1importprometheus) too!
 - Text file output, perfect for an OBS Text Source!
 - Self-Updating!
+- Optional heart rate overlay for Wayland desktops (Linux), with a flashing alarm for out-of-range BPM
 - Can auto-start with VRChat using [VRCX](https://github.com/vrcx-team/VRCX)'s App Launcher
 - Dummy Mode: Test avatars and prefabs without needing to put on/own a sensor
 - Hide temporary disconnections (optional): In case of spotty connections, this can help mask those moments of signal loss
@@ -155,6 +156,57 @@ battery = "heart_rate_battery"
 twitch_up = "heart_rate_twitch_up"
 twitch_down = "heart_rate_twitch_down"
 activity = "heart_rate_activity"
+
+# Only has an effect in builds with the `layer-shell` feature, see below
+[overlay]
+enabled = false
+# "background", "bottom", "top", or "overlay"
+layer = "overlay"
+# Gap in pixels between the overlay and the bottom of the screen
+margin_bottom = 24
+# Marked as stale if no packet has arrived for this many seconds
+stale_secs = 5
+# Overlay flashes when BPM is outside this range, 0 disables that limit
+low_bpm = 0
+high_bpm = 0
+```
+
+## Heart Rate Overlay (Linux/Wayland)
+
+An optional small overlay can show your current heart rate (`♥ 72`) near the bottom of every connected display while the TUI is running (monitors that are plugged in or removed later are picked up automatically).
+It sits on top of other windows, doesn't reserve any screen space, and mouse clicks pass through it.
+If `low_bpm` or `high_bpm` are set and your heart rate goes outside that range, the overlay flashes.
+
+It uses the TUI's connection, so pick your device in the TUI as usual and the overlay follows along.
+
+- **Building:** Requires the GTK 4 and [gtk4-layer-shell](https://github.com/wmww/gtk4-layer-shell) development packages, then build with `cargo build --release --features layer-shell`.
+- **Running:** Use `iron-heart --overlay`, or set `enabled = true` under `[overlay]`.
+- **Compositor support:** Needs a compositor that supports the `wlr-layer-shell` protocol (niri, Sway, Hyprland, KDE Plasma, etc). GNOME is not supported. If it's unavailable, the overlay logs a warning and the TUI carries on as normal.
+- **Without the feature:** `--overlay` only logs a warning.
+
+### Styling
+
+Place an `iron-heart-overlay.css` file next to your config file to override the default styles.
+The overlay's text has the class `.iron-heart-overlay`, plus one or more state classes:
+
+| Class | When |
+|---|---|
+| `.connected` | A heart rate reading is available |
+| `.disconnected` | No reading (shows `♥ --`) |
+| `.stale` | No packet received for `stale_secs` |
+| `.alarm` | BPM is outside `low_bpm`/`high_bpm` |
+
+For example, to make the alarm flash orange, and faster:
+
+```css
+@keyframes my-flash {
+    from { background-color: #e66100; }
+    to { background-color: rgba(0, 0, 0, 0.6); }
+}
+
+.iron-heart-overlay.alarm {
+    animation: my-flash 0.25s ease-in-out infinite alternate;
+}
 ```
 
 ## Known Compatible WebSocket Senders

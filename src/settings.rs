@@ -126,6 +126,20 @@ pub struct AutoUpdateSettings {
     pub version_skipped: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct OverlaySettings {
+    pub enabled: bool,
+    // "background" | "bottom" | "top" | "overlay"
+    pub layer: String,
+    pub margin_bottom: i32,
+    // No packet for this many seconds => marked stale
+    pub stale_secs: u16,
+    // 0 disables the limit
+    pub low_bpm: u16,
+    // 0 disables the limit
+    pub high_bpm: u16,
+}
+
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Settings {
     pub osc: OscSettings,
@@ -137,6 +151,7 @@ pub struct Settings {
     pub updates: AutoUpdateSettings,
     pub activities: ActivitiesSettings,
     pub prometheus: PrometheusSettings,
+    pub overlay: OverlaySettings,
 }
 
 impl Settings {
@@ -229,6 +244,12 @@ impl Settings {
             .set_default("prometheus.metrics.twitch_down", "heart_rate_twitch_down")?
             .set_default("prometheus.metrics.activity", "heart_rate_activity")?
             // .set_default("prometheus.batch_size", 30)?
+            .set_default("overlay.enabled", false)?
+            .set_default("overlay.layer", "overlay")?
+            .set_default("overlay.margin_bottom", 24)?
+            .set_default("overlay.stale_secs", 5)?
+            .set_default("overlay.low_bpm", 0)?
+            .set_default("overlay.high_bpm", 0)?
             .build()?
             .try_deserialize()?;
 

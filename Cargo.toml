@@ -13,6 +13,8 @@ license = "MIT"
 [features]
 # When active, ignores user dotfiles/AppData, using the current directory instead
 portable = []
+# Wayland layer-shell heart rate overlay (Linux only, needs gtk4 + gtk4-layer-shell)
+layer-shell = ["dep:gtk4", "dep:gtk4-layer-shell"]
 
 [dependencies]
 btleplug = "0.13"
@@ -83,6 +85,10 @@ self_update = { version = "0.41.0", features = [
     "compression-zip-bzip2",
     "compression-zip-deflate",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk4 = { version = "0.11", optional = true, features = ["v4_12"] }
+gtk4-layer-shell = { version = "0.8", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 self_update = { version = "0.41.0", features = ["compression-flate2"] }

@@ -35,6 +35,7 @@ mod heart_rate;
 mod logging;
 mod macros;
 mod osc;
+mod overlay;
 mod panic_handler;
 mod scan;
 mod settings;

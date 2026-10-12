@@ -16,6 +16,9 @@ pub struct TopLevelCmd {
     /// skip vrcx and auto-update prompts
     #[argh(switch)]
     pub skip_prompts: bool,
+    /// show the heart rate in a Wayland layer-shell overlay (needs `layer-shell` feature)
+    #[argh(switch)]
+    pub overlay: bool,
     #[argh(subcommand)]
     pub subcommands: Option<SubCommands>,
 }

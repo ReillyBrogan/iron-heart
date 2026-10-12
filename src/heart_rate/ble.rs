@@ -6,7 +6,7 @@ use crate::structs::DeviceInfo;
 use btleplug::api::{Characteristic, Peripheral, ValueNotification};
 use futures::{Stream, StreamExt};
 use std::pin::Pin;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast::Sender as BSender;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
@@ -38,9 +38,58 @@ struct BleMonitorActor {
     rr_left_to_burn: usize,
 }
 
+// bluez-async gives BlueZ only 5 seconds after connecting to resolve services.
+// Straps that ask for a slow connection interval (the H10 wants 311-500ms) need longer than that.
+const SLOW_DISCOVERY_MAX_WAIT: Duration = Duration::from_secs(20);
+const SLOW_DISCOVERY_POLL: Duration = Duration::from_millis(1500);
+
+fn is_service_discovery_timeout(e: &btleplug::Error) -> bool {
+    matches!(e, btleplug::Error::Other(_)) && e.to_string().contains("Service discovery timed out")
+}
+
 // TODO Consider letting this thread be restarted
 
 impl BleMonitorActor {
+    /// Connects, tolerating BlueZ taking longer than bluez-async's built-in service discovery timeout.
+    /// The link is still up when that timeout fires, and BlueZ keeps discovering in the background.
+    async fn connect_device(
+        &self,
+        device: &btleplug::platform::Peripheral,
+    ) -> Result<(), btleplug::Error> {
+        let err = match device.connect().await {
+            Err(e) if is_service_discovery_timeout(&e) => e,
+            other => return other,
+        };
+        if !device.is_connected().await.unwrap_or(false) {
+            return Err(err);
+        }
+        warn!("Service discovery is slow (long connection interval?), waiting for BlueZ to finish");
+
+        let started = Instant::now();
+        let mut last_count = 0;
+        while started.elapsed() < SLOW_DISCOVERY_MAX_WAIT {
+            tokio::time::sleep(SLOW_DISCOVERY_POLL).await;
+            if !device.is_connected().await.unwrap_or(false) {
+                return Err(btleplug::Error::NotConnected);
+            }
+            device.discover_services().await?;
+            let characteristics = device.characteristics();
+            let has_hr = characteristics
+                .iter()
+                .any(|c| c.uuid == HEART_RATE_MEASUREMENT_CHARACTERISTIC_UUID);
+            // Wait for the count to stop growing so the battery service isn't missed
+            if has_hr && characteristics.len() == last_count {
+                info!(
+                    "Services resolved after {:.1}s of waiting",
+                    started.elapsed().as_secs_f32()
+                );
+                return Ok(());
+            }
+            last_count = characteristics.len();
+        }
+        Err(err)
+    }
+
     async fn connect(
         &mut self,
         broadcast_tx: &BSender<AppUpdate>,
@@ -60,7 +109,7 @@ impl BleMonitorActor {
                 self.peripheral.name, self.peripheral.address
             );
             tokio::select! {
-                conn_result = device.connect() => {
+                conn_result = self.connect_device(&device) => {
                     match conn_result {
                         Ok(_) => {
                             if let Err(e) = device.discover_services().await {
